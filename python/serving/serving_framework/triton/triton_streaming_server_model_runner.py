@@ -114,6 +114,7 @@ class TritonStreamingServerModelRunner(model_runner.ModelRunner):
     Raises:
       KeyError: If any of the model_output_keys are not found in the model
         output.
+      model_runner.ModelError: If an error is returned from the model server.
     """
     # If a bare np.ndarray was passed, it will be passed using the default
     # input key "inputs".
