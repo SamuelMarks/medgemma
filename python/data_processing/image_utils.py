@@ -58,9 +58,9 @@ def encode_png(array: np.ndarray) -> bytes:
       greyscale=True,
       bitdepth=_BITS_PER_BYTE * array.dtype.itemsize,
   )
-  output_data = io.BytesIO()
-  writer.write(output_data, array.tolist())
-  return output_data.getvalue()
+  with io.BytesIO() as output_data:
+    writer.write(output_data, array.tolist())
+    return output_data.getvalue()
 
 
 def rescale_dynamic_range(image: np.ndarray) -> np.ndarray:

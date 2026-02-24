@@ -71,7 +71,7 @@ _SUPPORTED_SAMPLES_PER_PIXEL = frozenset([1, 3])
 
 _MODALITY = dicom_source_utils.MODALITY
 _CXR_MODALITIES = dicom_source_utils.CXR_MODALITIES
-_WINDOWED_MODALITIES = (_MODALITY.CT,) + _CXR_MODALITIES
+_WINDOWED_MODALITIES = tuple([_MODALITY.CT])
 
 _DICOM_TAG_KEYWORDS_EQUAL_VALUE_FOR_INSTANCES_IN_SAME_ACQUISITION = (
     'SOPClassUID',
@@ -335,20 +335,39 @@ class _FrameBytes:
   decoded_frame_bytes: np.ndarray
 
 
+def _safe_yield(dicom_frames: Iterator[bytes]) -> Iterator[bytes]:
+  """Catch exceptions raised from from generator and re-raise as DicomError."""
+  try:
+    for compressed_frame_bytes in dicom_frames:
+      yield compressed_frame_bytes
+  except ValueError as exp:
+    raise data_accessor_errors.DicomError(
+        'Error decoding encapsulated DICOM frame.'
+    ) from exp
+
+
 def _decode_encapsulated_dicom_frames(
     dcm: pydicom.FileDataset, dicom_frames_compressed_bytes: Iterator[bytes]
 ) -> Iterator[_FrameBytes]:
   """Decodes compressed DICOM frames."""
   transfer_syntax_uid = dcm.file_meta.TransferSyntaxUID
   missing_pixel_data = True
-  for compressed_frame_bytes in dicom_frames_compressed_bytes:
-    decoded_frame_bytes = (
-        dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
-            compressed_frame_bytes, transfer_syntax_uid
-        )
-    )
+  for compressed_frame_bytes in _safe_yield(dicom_frames_compressed_bytes):
+    try:
+      decoded_frame_bytes = (
+          dicom_frame_decoder.decode_dicom_compressed_frame_bytes(
+              compressed_frame_bytes, transfer_syntax_uid
+          )
+      )
+    except RuntimeError as exp:
+      # image codecs raises a runtime error when it cannot decode the frame.
+      raise data_accessor_errors.DicomError(
+          'Error decoding encapsulated DICOM PixelData.'
+      ) from exp
     if decoded_frame_bytes is None:
-      raise data_accessor_errors.DicomError('Cannot decode DICOM pixel data.')
+      raise data_accessor_errors.DicomError(
+          'Error decoding encapsulated DICOM PixelData.'
+      )
     if dcm.SamplesPerPixel == 1 and decoded_frame_bytes.shape[2] == 3:
       decoded_frame_bytes = decoded_frame_bytes[..., 0]
     missing_pixel_data = False
@@ -401,31 +420,38 @@ def _default_cxr_window_op(
 ) -> Optional[ImageTransform]:
   """Returns default window operation for CXR imaging."""
   if _WINDOW_WIDTH in dcm and _WINDOW_CENTER in dcm:
-    return TraditionalWindow(dcm.WindowCenter, dcm.WindowWidth)
+    if dcm.WindowCenter is not None and dcm.WindowWidth is not None:
+      return TraditionalWindow(dcm.WindowCenter, dcm.WindowWidth)
   return None
 
 
-def _norm_cxr_imaging(
-    window: Optional[ImageTransform],
+def norm_cxr_imaging(
     arr: np.ndarray,
     ds: pydicom.FileDataset,
+    output_dtype: Optional[Union[_UINT8_TYPE, _UINT16_TYPE]] = None,
 ) -> np.ndarray:
   """Applies data handling from pydicom."""
-  pixel_array = pydicom.pixels.processing.apply_modality_lut(arr, ds)
-  if window is not None:
-    # windowing will normalize imaging to uint16.
-    # with dynamic range scaled across the windowed range.
-    if isinstance(window, RGBWindow):
-      raise data_accessor_errors.InvalidRequestFieldError(
-          'Invalid windowing configuration for CXR imaging.'
-      )
-    pixel_array = window.apply(pixel_array)
-  if pixel_array.dtype == np.float64:
+  output_dtype = output_dtype if output_dtype is not None else arr.dtype
+  # pytype: disable=module-attr
+  try:
+    if _PYDICOM_MAJOR_VERSION <= 2:
+      pixel_array = pydicom.pixels.processing.apply_modality_lut(arr, ds)
+    else:
+      pixel_array = pydicom.pixels.apply_modality_lut(arr, ds)
+  except TypeError:
+    # If rescale slope and intercept are not defined, pydicom raises a
+    # TypeError. pixel data is not altered by the LUT, we can use the original
+    # pixel array.
+    pixel_array = arr
+  # pytype: enable=module-attr
+  if pixel_array.dtype.kind not in ('i', 'u'):  # if not integer
     # if pixel array is altered by the LUT will be transformed to float64.
     # https://pydicom.github.io/pydicom/dev/reference/generated/pydicom.pixels.apply_modality_lut.html
     # cast back to the original integer dtype for windowing.
-    pixel_array = pixel_array.astype(arr.dtype)
-  # Scale imaging
+    pixel_array = np.round(pixel_array, 0).astype(output_dtype)
+  elif pixel_array.dtype != output_dtype:
+    pixel_array = pixel_array.astype(output_dtype)
+  # Rescale imaging dynamic range to be across the full bit range.
   pixel_array = _rescale_cxr_dynamic_range(pixel_array)
   if ds.PhotometricInterpretation == MONOCHROME1:
     return np.iinfo(pixel_array.dtype).max - pixel_array
@@ -573,7 +599,7 @@ def _get_modality_image_transform(
   ].get_image_image_transform(dcm)
 
 
-def _decode_dicom_image(
+def decode_dicom_image(
     dcm: pydicom.FileDataset,
     target_icc_profile: Optional[ImageCms.core.CmsProfile],
 ) -> Iterator[np.ndarray]:
@@ -631,9 +657,7 @@ def _decode_dicom_images(
           raise data_accessor_errors.DicomError(
               'Concatenated DICOM are not supported.'
           )
-        # currently only process one file at a time.
-        # change to enable multiple files for mri volume norm.
-        for img in _decode_dicom_image(
+        for img in decode_dicom_image(
             dcm,
             target_icc_profile,
         ):
@@ -753,7 +777,7 @@ def _transformed_non_mri_image(
   )
   if img.ndim == 3 and img.shape[2] == 1:
     if modality in _CXR_MODALITIES:
-      return _norm_cxr_imaging(image_transform, img, dcm)
+      return norm_cxr_imaging(img, dcm)
     elif modality == _MODALITY.CT:
       return _norm_ct_imaging(image_transform, img, dcm)
   return img

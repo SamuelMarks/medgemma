@@ -815,7 +815,8 @@ class GenericDicomHandlerTest(parameterized.TestCase):
         dcm.save_as(dcm_data)
       dcm_data.seek(0)
       with self.assertRaisesRegex(
-          data_accessor_errors.DicomError, '.*Cannot decode DICOM pixel data.*'
+          data_accessor_errors.DicomError,
+          '.*Error decoding encapsulated DICOM PixelData.*',
       ):
         test_utils.flatten_data_acquisition(
             _generic_dicom_handler.process_files(
