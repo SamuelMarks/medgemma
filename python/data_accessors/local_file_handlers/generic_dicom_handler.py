@@ -428,10 +428,8 @@ def _default_cxr_window_op(
 def norm_cxr_imaging(
     arr: np.ndarray,
     ds: pydicom.FileDataset,
-    output_dtype: Optional[Union[_UINT8_TYPE, _UINT16_TYPE]] = None,
 ) -> np.ndarray:
   """Applies data handling from pydicom."""
-  output_dtype = output_dtype if output_dtype is not None else arr.dtype
   # pytype: disable=module-attr
   try:
     if _PYDICOM_MAJOR_VERSION <= 2:
@@ -444,13 +442,6 @@ def norm_cxr_imaging(
     # pixel array.
     pixel_array = arr
   # pytype: enable=module-attr
-  if pixel_array.dtype.kind not in ('i', 'u'):  # if not integer
-    # if pixel array is altered by the LUT will be transformed to float64.
-    # https://pydicom.github.io/pydicom/dev/reference/generated/pydicom.pixels.apply_modality_lut.html
-    # cast back to the original integer dtype for windowing.
-    pixel_array = np.round(pixel_array, 0).astype(output_dtype)
-  elif pixel_array.dtype != output_dtype:
-    pixel_array = pixel_array.astype(output_dtype)
   # Rescale imaging dynamic range to be across the full bit range.
   pixel_array = _rescale_cxr_dynamic_range(pixel_array)
   if ds.PhotometricInterpretation == MONOCHROME1:
@@ -470,25 +461,33 @@ def _default_mri_volume_window_op(
   return NopImageTransform()
 
 
-def _norm_ct_imaging(
-    window: Optional[ImageTransform],
-    arr: np.ndarray,
-    ds: pydicom.FileDataset,
-) -> np.ndarray:
-  """Applies data handling from pydicom."""
+def rescale_ct_imaging(arr: np.ndarray, ds: pydicom.FileDataset) -> np.ndarray:
+  """Rescales CT to HU."""
   # Not applying ModalityLUTSequence on CT images.
-  has_rescale_slope = 'RescaleSlope' in ds
-  has_rescale_intercept = 'RescaleIntercept' in ds
+  has_rescale_slope = 'RescaleSlope' in ds and isinstance(
+      ds.RescaleSlope, float | int
+  )
+  has_rescale_intercept = 'RescaleIntercept' in ds and isinstance(
+      ds.RescaleIntercept, float | int
+  )
   if has_rescale_slope and has_rescale_intercept:
     pixel_array = arr.astype(np.float64) * float(ds.RescaleSlope)
     pixel_array += float(ds.RescaleIntercept)
-    pixel_array = np.round(pixel_array, 0).astype(arr.dtype)
+    return np.round(pixel_array, 0).astype(np.int32)
   elif has_rescale_slope or has_rescale_intercept:
     raise data_accessor_errors.DicomError(
         'DICOM instance is missing RescaleSlope or RescaleIntercept tags.'
     )
   else:
-    pixel_array = arr
+    return arr
+
+
+def norm_ct_imaging(
+    window: Optional[ImageTransform],
+    arr: np.ndarray,
+    ds: pydicom.FileDataset,
+) -> np.ndarray:
+  """Applies data handling from pydicom."""
   if window is None:
     # This is a currently largely a internal error. At the time of writing it
     # is expected that all processed radiology modalities will use a default
@@ -500,7 +499,7 @@ def _norm_ct_imaging(
     )
   # windowing will normalize imaging to uint16.
   # with dynamic range scaled across the windowed range.
-  return window.apply(pixel_array)
+  return window.apply(rescale_ct_imaging(arr, ds))
 
 
 def validate_samples_per_pixel(dcm: pydicom.FileDataset) -> None:
@@ -779,7 +778,7 @@ def _transformed_non_mri_image(
     if modality in _CXR_MODALITIES:
       return norm_cxr_imaging(img, dcm)
     elif modality == _MODALITY.CT:
-      return _norm_ct_imaging(image_transform, img, dcm)
+      return norm_ct_imaging(image_transform, img, dcm)
   return img
 
 

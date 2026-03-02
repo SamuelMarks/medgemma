@@ -112,12 +112,14 @@ def shift_to_unsigned(image: np.ndarray) -> np.ndarray:
   elif image.dtype == np.int8:
     image = image.astype(np.int16)
     return (image - np.min(image)).astype(np.uint8)
-  elif image.dtype == float:
+  elif image.dtype.kind == 'f':
     uint16_max = np.iinfo(np.uint16).max
     image = image - np.min(image)
-    if np.max(image) > uint16_max:
-      image = image * (uint16_max / np.max(image))
-      image[image > uint16_max] = uint16_max
+    max_image = np.max(image)
+    if max_image > uint16_max:
+      image *= (uint16_max / max_image)
+      np.clip(image, None, uint16_max, out=image)
+    np.round(image, 0, out=image)
     return image.astype(np.uint16)
   raise ValueError(
       'Image pixels must be an 8, 16 bit integer or float type. '

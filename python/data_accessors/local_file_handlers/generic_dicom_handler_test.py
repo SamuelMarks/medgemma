@@ -1178,6 +1178,63 @@ class GenericDicomHandlerTest(parameterized.TestCase):
           )
       )
 
+  def test_ct_rescale_slope_and_intercept(self):
+    with pydicom.dcmread(
+        _mock_ct_dicom(
+            os.path.join(self.create_tempdir(), 'test.dcm'),
+            'MONOCHROME2',
+            0,
+            1000,
+        )
+    ) as dcm:
+      dcm.RescaleSlope = 66
+      dcm.RescaleIntercept = -33000
+      img = np.arange(1002, dtype=np.uint16)
+      rescaled_img = generic_dicom_handler.rescale_ct_imaging(img, dcm)
+      self.assertEqual(rescaled_img.dtype, np.int32)
+      self.assertEqual(np.min(rescaled_img), -33000)
+      self.assertEqual(np.max(rescaled_img), 33066)
+
+  def test_ct_window(self):
+    dcm_path = _mock_ct_dicom(
+        os.path.join(self.create_tempdir(), 'test.dcm'),
+        'MONOCHROME2',
+        0,
+        1000,
+    )
+    with pydicom.dcmread(dcm_path) as dcm:
+      dcm.RescaleSlope = 2
+      dcm.RescaleIntercept = -32767
+      image_pixels = np.zeros((3, 3), dtype=np.uint16)
+      for i in range(9):
+        image_pixels[int(i // 3), int(i % 3)] = 32767 * i / 8
+      dcm.PixelData = image_pixels.tobytes()
+      dcm.save_as(dcm_path)
+    handler = generic_dicom_handler.GenericDicomHandler({
+        'CT': generic_dicom_handler.ModalityDefaultImageTransform(
+            get_image_transform_op=lambda dcm: generic_dicom_handler.TraditionalWindow(
+                4096, 57344
+            ),
+        )
+    })
+    result = test_utils.flatten_data_acquisition(
+        handler.process_files(
+            [], {}, abstract_handler.InputFileIterator([dcm_path])
+        )
+    )
+    self.assertLen(result, 1)
+    np.testing.assert_array_equal(
+        np.squeeze(result[0], axis=-1),
+        np.asarray(
+            [
+                [0, 0, 36],
+                [73, 109, 146],
+                [182, 219, 255],
+            ],
+            dtype=np.uint8,
+        ),
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
