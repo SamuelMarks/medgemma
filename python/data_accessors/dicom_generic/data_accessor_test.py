@@ -15,7 +15,9 @@
 """Unit tests for dicom_generic data accessor."""
 
 import contextlib
+import copy
 from typing import Any, Mapping, Sequence
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -33,6 +35,7 @@ from data_accessors.dicom_generic import data_accessor
 from data_accessors.dicom_generic import data_accessor_definition
 from data_accessors.utils import test_utils
 from ez_wsi_dicomweb.test_utils.dicom_store_mock import dicom_store_mock
+
 
 _InstanceJsonKeys = data_accessor_const.InstanceJsonKeys
 
@@ -291,6 +294,63 @@ class DataAccessorTest(parameterized.TestCase):
         )
         with self.assertRaises(data_accessor_errors.DicomError):
           list(data_accessor.DicomGenericData(instance).data_iterator())
+
+  def test_download_multiple_dicom_instances_from_same_series(self):
+    with pydicom.dcmread(
+        test_utils.testdata_path('cxr', 'encapsulated_cxr.dcm')
+    ) as dcm1:
+      dcm2 = copy.deepcopy(dcm1)
+      dcm2.SOPInstanceUID = '1.2.3'
+      dcm2.file_meta.MediaStorageSOPInstanceUID = '1.2.3'
+
+      with dicom_store_mock.MockDicomStores(
+          _MOCK_DICOM_STORE_PATH
+      ) as dicom_store:
+        dicom_store[_MOCK_DICOM_STORE_PATH].add_instance(dcm1)
+        dicom_store[_MOCK_DICOM_STORE_PATH].add_instance(dcm2)
+
+        instance_path1 = _create_dicom_web_uri(dcm1)
+        instance_path2 = _create_dicom_web_uri(dcm2)
+
+        json_instance = {
+            _InstanceJsonKeys.DICOM_SOURCE: [instance_path1, instance_path2],
+        }
+
+        dwi = dicom_web_interface.DicomWebInterface(
+            credential_factory_module.NoAuthCredentialsFactory()
+        )
+
+        instance = data_accessor_definition.json_to_generic_dicom_image(
+            credential_factory_module.NoAuthCredentialsFactory(),
+            json_instance,
+            default_patch_width=256,
+            default_patch_height=256,
+            require_patch_dim_match_default_dim=False,
+            dicom_instances_metadata=dwi.get_instances(
+                dicom_path.FromString(instance_path1).GetSeriesPath()
+            ),
+        )
+
+        data_accessor_instance = data_accessor.DicomGenericData(instance)
+        with contextlib.ExitStack() as stack:
+          mock_download_series = stack.enter_context(
+              mock.patch.object(
+                  data_accessor,
+                  '_download_dicom_series',
+                  wraps=data_accessor._download_dicom_series,
+              )
+          )
+          mock_download_instance = stack.enter_context(
+              mock.patch.object(
+                  data_accessor,
+                  '_download_dicom_instance',
+                  wraps=data_accessor._download_dicom_instance,
+              )
+          )
+          data_accessor_instance.load_data(stack)
+          self.assertLen(data_accessor_instance._local_file_paths, 2)
+          mock_download_series.assert_called_once()
+          mock_download_instance.assert_not_called()
 
 
 if __name__ == '__main__':

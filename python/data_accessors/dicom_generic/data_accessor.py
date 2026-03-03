@@ -13,11 +13,16 @@
 # limitations under the License.
 """Data accessor for generic DICOM images stored in a DICOM store."""
 
+import collections
+from collections.abc import Iterator, Mapping, Sequence
 import contextlib
+import dataclasses
 import functools
+import io
+import logging
 import os
 import tempfile
-from typing import Iterator, Mapping, Optional, Sequence
+from typing import Optional
 
 from ez_wsi_dicomweb import dicom_frame_decoder
 from ez_wsi_dicomweb import dicom_web_interface
@@ -40,6 +45,13 @@ _InstanceJsonKeys = data_accessor_const.InstanceJsonKeys
 _UNCOMPRESSED_LITTLE_ENDIAN_TRANSFER_SYNTAX_UID = '1.2.840.10008.1.2.1'
 
 
+@dataclasses.dataclass(frozen=True)
+class _InstanceDownloadInfo:
+  transfer_syntax_uid: str
+  sop_instance_uid: str
+  local_file_path: str
+
+
 def _can_decode_transfer_syntax(transfer_syntax_uid: str) -> bool:
   if (
       transfer_syntax_uid
@@ -51,23 +63,137 @@ def _can_decode_transfer_syntax(transfer_syntax_uid: str) -> bool:
   )
 
 
+def _get_series_instances(
+    dicom_instances: Iterator[bytes],
+    instance_filename_map: Mapping[str, Sequence[str]],
+) -> list[str]:
+  """Returns a list of file names written from the DICOM series bytes."""
+  filenames_written = []
+  instances_uid_written = 0
+  first_exception = None
+  for dcm_bytes in dicom_instances:
+    try:
+      with io.BytesIO(dcm_bytes) as dcm_file:
+        with pydicom.dcmread(dcm_file) as dcm:
+          if 'SOPInstanceUID' not in dcm:
+            raise pydicom.errors.InvalidDicomError(
+                'DICOM instance missing SOPInstanceUID.'
+            )
+          filenames = instance_filename_map.get(dcm.SOPInstanceUID)
+          if filenames is None:
+            continue
+          for filename in filenames:
+            dcm.save_as(filename)
+            filenames_written.append(filename)
+          instances_uid_written += 1
+    except pydicom.errors.InvalidDicomError as exp:
+      logging.warning(
+          'Failed to decode DICOM instance.', exc_info=True,
+      )
+      if first_exception is None:
+        first_exception = exp
+  if (
+      first_exception is not None
+      and len(instance_filename_map) != instances_uid_written
+  ):
+    raise data_accessor_errors.HttpError(
+        'DICOM series contains instances that could not be decoded.'
+    ) from first_exception
+  return filenames_written
+
+
+def _download_dicom_series(
+    dwi: dicom_web_interface.DicomWebInterface,
+    series_path: dicom_path.Path,
+    instance_download_info_list: Sequence[_InstanceDownloadInfo],
+) -> Sequence[str]:
+  """Downloads DICOM instances in DICOM series as single transaction.
+
+  Args:
+    dwi: DicomWebInterface to use for downloading.
+    series_path: DICOM series path to download.
+    instance_download_info_list: List of DICOM instances to save.
+
+  Returns:
+    Sequence of local file paths to instances defined in
+    instance_download_info_list that were downloaded.
+  """
+  untranscoded_local_file_paths_by_sop_instance_uid = collections.defaultdict(
+      list
+  )
+  transcoded_local_file_paths_by_sop_instance_uid = collections.defaultdict(
+      list
+  )
+  for info in instance_download_info_list:
+    if _can_decode_transfer_syntax(info.transfer_syntax_uid):
+      untranscoded_local_file_paths_by_sop_instance_uid[
+          info.sop_instance_uid
+      ].append(info.local_file_path)
+    else:
+      transcoded_local_file_paths_by_sop_instance_uid[
+          info.sop_instance_uid
+      ].append(info.local_file_path)
+  if (
+      len(untranscoded_local_file_paths_by_sop_instance_uid) > 1
+      and not transcoded_local_file_paths_by_sop_instance_uid
+  ):
+    # Conservative heuristic to avoid double downloading imaging.
+    # Download transcoded series only if more than one instance is requested and
+    # untranscoded series imaging is not being requested.
+    try:
+      return _get_series_instances(
+          dwi.download_series(series_path, '*'),
+          untranscoded_local_file_paths_by_sop_instance_uid,
+      )
+    except (ez_wsi_errors.HttpError, data_accessor_errors.HttpError):
+      # if series download fails, fall back to individual instance downloads.
+      # series download may fail due to error in transmitting very large
+      # multi-part response.
+      logging.warning(
+          'Failed to download DICOM series instances in single transaction.'
+          ' Falling back to individual instance downloads.',
+          exc_info=True,
+      )
+  elif (
+      len(transcoded_local_file_paths_by_sop_instance_uid) > 1
+      and not untranscoded_local_file_paths_by_sop_instance_uid
+  ):
+    # Conservative heuristic to avoid double downloading imaging.
+    # Download transcoded series only if more than one instance is requested and
+    # untranscoded series imaging is not being requested.
+    try:
+      return _get_series_instances(
+          dwi.download_series(
+              series_path, _UNCOMPRESSED_LITTLE_ENDIAN_TRANSFER_SYNTAX_UID
+          ),
+          transcoded_local_file_paths_by_sop_instance_uid,
+      )
+    except (ez_wsi_errors.HttpError, data_accessor_errors.HttpError):
+      # if series download fails, fall back to individual instance downloads.
+      # series download may fail due to error in transcoding or in transmitting
+      # a very large multi-part response.
+      logging.warning(
+          'Failed to download transcoded DICOM series instances in single'
+          ' transaction. Falling back to individual instance downloads.',
+          exc_info=True,
+      )
+  return []
+
+
 def _download_dicom_instance(
     dwi: dicom_web_interface.DicomWebInterface,
-    temp_dir: str,
     series_path: dicom_path.Path,
-    index_transfer_syntax_uid_sop_instance_uid: tuple[int, str, str],
-) -> str:
+    instance_download_info: _InstanceDownloadInfo,
+) -> None:
   """Downloads DICOM instance to a local file."""
-  index, transfer_syntax_uid, sop_instance_uid = (
-      index_transfer_syntax_uid_sop_instance_uid
-  )
   instance_path = dicom_path.FromPath(
-      series_path, instance_uid=sop_instance_uid
+      series_path, instance_uid=instance_download_info.sop_instance_uid
   )
-  temp_file = os.path.join(temp_dir, f'{index}.dcm')
-  with open(temp_file, 'wb') as output_file:
+  with open(instance_download_info.local_file_path, 'wb') as output_file:
     try:
-      if _can_decode_transfer_syntax(transfer_syntax_uid):
+      if _can_decode_transfer_syntax(
+          instance_download_info.transfer_syntax_uid
+      ):
         dwi.download_instance_untranscoded(instance_path, output_file)
       else:
         # transcode to uncompressed little endian.
@@ -78,7 +204,6 @@ def _download_dicom_instance(
         )
     except ez_wsi_errors.HttpError as exp:
       raise data_accessor_errors.HttpError(str(exp)) from exp
-  return temp_file
 
 
 def _download_dicom_instances(
@@ -112,30 +237,49 @@ def _download_dicom_instances(
       selected_md_list.append(instance_md)
 
   series_path = instance.dicomweb_paths[0].GetSeriesPath()
-  instance_list = []
-  for i, md in enumerate(selected_md_list):
-    instance_list.append((i, md.transfer_syntax_uid, md.sop_instance_uid))
+  instance_list = [
+      _InstanceDownloadInfo(
+          md.transfer_syntax_uid,
+          md.sop_instance_uid,
+          os.path.join(temp_dir, f'{i}.dcm'),
+      )
+      for i, md in enumerate(selected_md_list)
+  ]
 
+  # If only one instance, download it in current thread.
+  if len(instance_list) == 1:
+    _download_dicom_instance(dwi, series_path, instance_list[0])
+    return [instance_list[0].local_file_path]
+
+  # Attempt to download series as a single unit to reduce total transaction.
+  files_retrieved = _download_dicom_series(
+      dwi,
+      series_path,
+      instance_list,
+  )
+  # List of instances that need to be downloaded individually.
+  dicom_instances_to_download_individually = [
+      i for i in instance_list if i.local_file_path not in files_retrieved
+  ]
   max_parallel_download_workers = max(config.max_parallel_download_workers, 1)
-  if len(instance_list) == 1 or max_parallel_download_workers == 1:
-    return [
-        _download_dicom_instance(
-            dwi,
-            temp_dir,
-            series_path,
-            li,
-        )
-        for li in instance_list
-    ]
-  with config.get_worker_executor() as executor:
-    return list(
-        executor.map(
-            functools.partial(
-                _download_dicom_instance, dwi, temp_dir, series_path
-            ),
-            instance_list,
-        )
-    )
+  if (
+      len(dicom_instances_to_download_individually) == 1
+      or max_parallel_download_workers == 1
+  ):
+    # if only one instance or not operating in series then download in current
+    # thread.
+    for instance in dicom_instances_to_download_individually:
+      _download_dicom_instance(dwi, series_path, instance)
+  else:
+    # if multiple instances and operating in parallel.
+    with config.get_worker_executor() as executor:
+      list(
+          executor.map(
+              functools.partial(_download_dicom_instance, dwi, series_path),
+              dicom_instances_to_download_individually,
+          )
+      )
+  return [i.local_file_path for i in instance_list]
 
 
 def _get_dicom_image(

@@ -1,7 +1,7 @@
 absl-py
 #jsonschema~=4.23.0
 numpy<=2.0.2
-opencv-python-headless~=4.11.0.86
+#opencv-python-headless~=4.11.0.86  included in data_accessors
 requests-mock~=1.9.3
 #pyyaml~=6.0.2
 #requests~=2.32.3
