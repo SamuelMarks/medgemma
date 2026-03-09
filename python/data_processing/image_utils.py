@@ -73,11 +73,11 @@ def rescale_dynamic_range(image: np.ndarray) -> np.ndarray:
     Rescaled copy of `image` that uses all the available bits per pixel.
 
   Raises:
-    ValueError: If pixels are not of an integer type.
+    ValueError: If pixels are not of an unsigned integer type.
   """
-  if not np.issubdtype(image.dtype, np.integer):
+  if not np.issubdtype(image.dtype, np.unsignedinteger):
     raise ValueError(
-        'Image pixels must be an integer type. '
+        'Image pixels must be an unsigned integer. '
         f'Actual type: {image.dtype.name!r}'
     )
   iinfo = np.iinfo(image.dtype)
