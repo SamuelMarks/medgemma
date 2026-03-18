@@ -21,10 +21,10 @@ FROM python:3.12-slim AS prep
 COPY ./python/serving/requirements.txt requirements.txt
 COPY ./python/serving/serving_framework/pip-install.txt pip-install.txt
 RUN python3.12 -m venv --copies /payload/server-env && \
+    /payload/server-env/bin/python3.12 -m pip install --require-hashes  \
+        --no-input -r pip-install.txt && \
     /payload/server-env/bin/python3.12 -m pip install --require-hashes \
-        -r pip-install.txt && \
-    /payload/server-env/bin/python3.12 -m pip install --require-hashes \
-        -r requirements.txt
+        --no-input -r requirements.txt
 
 # Set up code directories
 COPY ./python/data_accessors /payload/data_accessors
@@ -34,13 +34,29 @@ COPY ./LICENSE /payload/LICENSE
 RUN mv /payload/serving/model_configuration /payload/model_repository && \
     chmod a+x /payload/serving/entrypoint.sh
 
+# Install git and clone source code for mirroring
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y git && \
+    rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/certifi/python-certifi.git /source-mirror/python-certifi && \
+    git clone https://github.com/tqdm/tqdm.git /source-mirror/tqdm && \
+    git clone https://git.launchpad.net/launchpadlib /source-mirror/launchpadlib && \
+    git clone https://git.launchpad.net/lazr.restfulclient /source-mirror/lazr.restfulclient && \
+    git clone https://git.launchpad.net/lazr.uri /source-mirror/lazr.uri && \
+    git clone https://git.launchpad.net/wadllib /source-mirror/wadllib && \
+    git clone https://github.com/openslide/openslide-bin.git /source-mirror/openslide-bin && \
+    git clone https://github.com/openslide/openslide-python.git /source-mirror/openslide-python && \
+    git clone https://github.com/pycountry/pycountry.git /source-mirror/pycountry && \
+    git clone https://gitlab.gnome.org/GNOME/pygobject.git /source-mirror/pygobject && \
+    git clone https://git.launchpad.net/python-apt /source-mirror/python-apt
+
 # ----------------------------------------------------------------------------
 
 FROM google/cloud-sdk:stable AS gcloud_builder
 
 # ----------------------------------------------------------------------------
 
-FROM nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3
+FROM nvcr.io/nvidia/tritonserver:25.06-vllm-python-py3
 
 WORKDIR /
 # Copy in minimal gcloud install
@@ -55,24 +71,10 @@ RUN apt-mark hold libnccl-dev libnccl2 && \
     # Cleanup cached files.
     rm -rf /var/lib/apt/lists/*
 
-# Clone python-certifi to meet MPL 2.0 License terms for source code mirroring
-ADD https://github.com/certifi/python-certifi.git /source-mirror/python-certifi
-
-# Clone tdqm to meet MPL 2.0 License terms for source code mirroring
-ADD https://github.com/tqdm/tqdm.git /source-mirror/tqdm
-
-# Clone GPL and LGPL source code for mirroring.
-ADD https://git.launchpad.net/launchpadlib /source-mirror/launchpadlib
-ADD https://git.launchpad.net/lazr.restfulclient /source-mirror/lazr.restfulclient
-ADD https://git.launchpad.net/lazr.uri /source-mirror/lazr.uri
-ADD https://git.launchpad.net/wadllib /source-mirror/wadllib
-ADD https://github.com/openslide/openslide-bin.git /source-mirror/openslide-bin
-ADD https://github.com/openslide/openslide-python.git /source-mirror/openslide-python
-ADD https://github.com/pycountry/pycountry.git /source-mirror/pycountry
-ADD https://gitlab.gnome.org/GNOME/pygobject.git /source-mirror/pygobject
-ADD https://git.launchpad.net/python-apt /source-mirror/python-apt
-
 # Copy the code and python environment from the prep image
 COPY --from=prep /payload /
+
+# Copy mirrored source code from the prep image
+COPY --from=prep /source-mirror /source-mirror/
 
 ENTRYPOINT ["/serving/entrypoint.sh"]
