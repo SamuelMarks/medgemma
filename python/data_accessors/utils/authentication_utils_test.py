@@ -29,7 +29,7 @@ _MOCK_TOKEN = 'MOCK_AUTH_TOKEN'
 def _mock_apply_credentials(
     headers: MutableMapping[Any, Any], token: Optional[str] = None
 ) -> None:
-  headers['authorization'] = 'Bearer {}'.format(token or _MOCK_TOKEN)
+  headers['authorization'] = f'Bearer {token or _MOCK_TOKEN}'
 
 
 def _get_mocked_credentials(

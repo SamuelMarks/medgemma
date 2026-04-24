@@ -152,7 +152,7 @@ class SecretFlagUtilsTest(parameterized.TestCase):
       ),
       dict(
           testcase_name='defined_dict_bytes',
-          data='{"abc": "123"}'.encode('utf-8'),
+          data=b'{"abc": "123"}',
           expected_value={'abc': '123'},
       ),
   ])

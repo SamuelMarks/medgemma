@@ -42,7 +42,7 @@ def _decode_png(png_bytes: bytes) -> np.ndarray:
   byte_array = np.frombuffer(png_bytes, np.uint8)
   try:
     pixel_array = np.array(Image.open(io.BytesIO(byte_array))).astype(np.uint16)
-  except IOError as exc:
+  except OSError as exc:
     raise ValueError('Could not decode a png image from input.') from exc
   if pixel_array is None:
     raise ValueError('Could not decode a png image from input.')

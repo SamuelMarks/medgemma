@@ -85,7 +85,7 @@ class MockRedisClient:
     except KeyError:
       pass
 
-  def get(self, key: str) -> Optional[bytes]:
+  def get(self, key: str) -> bytes | None:
     key_entry = self._mock_data_dict.get(key)
     if key_entry is None:
       return self._handle_pipeline_result(None)
