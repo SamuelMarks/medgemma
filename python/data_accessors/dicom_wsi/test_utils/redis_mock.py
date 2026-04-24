@@ -55,7 +55,7 @@ class MockRedisClient:
     self._pipeline_results = []
     return self
 
-  def execute(self) -> List[Any]:
+  def execute(self) -> list[Any]:
     if self._pipeline_results is None:
       raise ValueError('Pipeline not initialized.')
     return self._pipeline_results

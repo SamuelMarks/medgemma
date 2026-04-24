@@ -34,7 +34,7 @@ def _mock_apply_credentials(
 
 def _get_mocked_credentials(
     scopes: Optional[Sequence[str]],
-) -> Tuple[google.auth.credentials.Credentials, str]:
+) -> tuple[google.auth.credentials.Credentials, str]:
   del scopes  # unused
   credentials_mock = mock.create_autospec(
       google.auth.credentials.Credentials, instance=True

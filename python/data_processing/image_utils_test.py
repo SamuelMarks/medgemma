@@ -117,8 +117,8 @@ class TestShiftValues(parameterized.TestCase):
   )
   def testSuccess(
       self,
-      input_list: List[int],
-      expected_list: List[int],
+      input_list: list[int],
+      expected_list: list[int],
       dtype: Any,
       expected_dtype: Any,
   ):
@@ -144,7 +144,7 @@ class TestRescaleDynamicRange(parameterized.TestCase):
       ('Flip', [3, 4, 5], [0, 32767, 65535]),
       ('NoFlip', [5, 6, 7, 10], [0, 13107, 26214, 65535]),
   )
-  def testSuccess(self, input_list: List[int], expected_list: List[int]):
+  def testSuccess(self, input_list: list[int], expected_list: list[int]):
     """Locks down expected linear interpolation behavior."""
     actual_list = image_utils.rescale_dynamic_range(
         np.array(input_list, dtype=np.uint16)
